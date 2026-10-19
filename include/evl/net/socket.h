@@ -1,0 +1,189 @@
+/*
+ * SPDX-License-Identifier: GPL-2.0
+ *
+ * Copyright (C) 2020 Philippe Gerum  <rpm@xenomai.org>
+ */
+
+#ifndef _EVL_NET_SOCKET_H
+#define _EVL_NET_SOCKET_H
+
+#include <linux/types.h>
+#include <linux/list.h>
+#include <linux/mutex.h>
+#include <linux/refcount.h>
+#include <linux/skbuff.h>
+#include <evl/wait.h>
+#include <evl/file.h>
+#include <evl/poll.h>
+#include <evl/crossing.h>
+#include <evl/work.h>
+#include <evl/net/timestamping.h>
+#include <evl/net/offload.h>
+#include <uapi/evl/types-abi.h>
+#include <uapi/evl/fcntl-abi.h>
+#include <uapi/evl/net/socket-abi.h>
+
+struct evl_socket;
+struct net;
+struct net_device;
+struct evl_net_offload;
+struct evl_net_udp_rcvslot;
+struct evl_net_timestamps;
+
+struct evl_net_proto {
+	int (*attach)(struct evl_socket *esk,
+		struct evl_net_proto *proto, int protocol);
+	void (*release)(struct evl_socket *esk);
+	void (*destroy)(struct evl_socket *esk);
+	int (*bind)(struct evl_socket *esk,
+		struct sockaddr *addr, int len);
+	void (*force_unbind)(struct evl_socket *esk);
+	int (*connect)(struct evl_socket *esk,
+		struct sockaddr *addr, int len, int flags);
+	int (*shutdown)(struct evl_socket *esk, int how);
+	int (*ioctl)(struct evl_socket *esk, unsigned int cmd,
+		unsigned long arg);
+	int (*solicit)(struct net *net,
+		struct net_device *dev,
+		struct sockaddr *addr, int flags);
+	ssize_t (*oob_send)(struct evl_socket *esk,
+			const struct user_oob_msghdr __user *u_msghdr,
+			struct iovec *iov,
+			size_t iovlen);
+	ssize_t (*oob_receive)(struct evl_socket *esk,
+			struct user_oob_msghdr __user *u_msghdr,
+			struct iovec *iov,
+			size_t iovlen);
+	__poll_t (*oob_poll)(struct evl_socket *esk,
+			struct oob_poll_wait *wait);
+	int (*handle_offload)(struct evl_socket *esk,
+			struct evl_net_offload *ofld);
+};
+
+struct evl_socket_domain {
+	int af_domain;
+	struct evl_net_proto *(*match)(int type, int protocol);
+	struct list_head next;
+};
+
+#define EVL_SOCK_TSOVERFLOW  0 /* Timestamping overflow. */
+
+struct evl_socket {
+	struct evl_net_proto *proto;
+	struct evl_file efile;
+	struct mutex lock;
+	struct net *net;
+	struct hlist_node hash;
+	struct list_head input;
+	/* Queued skbs avail for receive. */
+	struct evl_wait_queue input_wait;
+	/* Poll head for ->input_wait. */
+	struct evl_poll_head poll_head;
+	struct sock *sk;
+	atomic_t rmem_count;
+	int rmem_max;
+	atomic_t wmem_count;
+	int wmem_max;
+	struct evl_wait_queue wmem_wait;
+	struct evl_crossing wmem_drain;
+	unsigned long flags;
+	int protocol;
+	int timestamping;
+	spinlock_t ts_lock;
+	struct evl_net_timestamps __rcu *tx_timestamps;
+	refcount_t refs;	/* release vs destroy */
+	struct list_head next_binding;
+	union {
+		/* Packet interface data. */
+		struct {
+			int bound_if;
+			bool force_unbound;
+			struct list_head next;
+		} packet;
+		/* Used by all IP protocols we support. */
+		struct {
+			/* UDP bindings. */
+			union {
+				struct {
+					u32 rcv_addr;
+					u16 rcv_port;
+					struct evl_net_udp_rcvslot *rcv_slot;
+					struct list_head next; /* in rcv_slot->receivers */
+				} udp;
+			};
+		} ip;
+	} u;
+};
+
+static inline unsigned int evl_socket_f_flags(struct evl_socket *esk)
+{
+	return esk->efile.filp->f_flags;
+}
+
+static inline bool evl_charge_socket_rmem(struct evl_socket *esk,
+					  size_t size)
+{
+	/* An overflow of skb->truesize - 1 is allowed, not more. */
+	if (atomic_read(&esk->rmem_count) >= esk->rmem_max)
+		return false;
+
+	/* We don't have to saturate, atomic_t is fine. */
+	atomic_add(size, &esk->rmem_count);
+
+	return true;
+}
+
+static inline void evl_uncharge_socket_rmem(struct evl_socket *esk,
+					    size_t size)
+{
+	int count = atomic_sub_return(size, &esk->rmem_count);
+	EVL_WARN_ON(NET, count < 0);
+}
+
+int evl_charge_socket_wmem(struct evl_socket *esk, size_t size,
+			ktime_t timeout, enum evl_tmode tmode);
+
+void evl_uncharge_socket_wmem(struct evl_socket *esk, size_t size);
+
+int evl_register_socket_domain(struct evl_socket_domain *domain);
+
+void evl_unregister_socket_domain(struct evl_socket_domain *domain);
+
+void evl_net_purge_socket_input(struct evl_socket *esk);
+
+ssize_t evl_net_offload_inband(struct evl_socket *esk,
+			struct kvec *kvec, size_t count,
+			struct sockaddr_in *in_dest);
+
+int evl_socket_no_bind(struct evl_socket *esk,
+		struct sockaddr *addr, int len);
+
+int evl_socket_no_connect(struct evl_socket *esk,
+			struct sockaddr *addr, int len, int flags);
+
+int evl_socket_no_ioctl(struct evl_socket *esk, unsigned int cmd,
+			unsigned long arg);
+
+ssize_t evl_socket_no_send(struct evl_socket *esk,
+			const struct user_oob_msghdr __user *u_msghdr,
+			struct iovec *iov,
+			size_t iovlen);
+
+ssize_t evl_socket_no_receive(struct evl_socket *esk,
+			struct user_oob_msghdr __user *u_msghdr,
+			struct iovec *iov,
+			size_t iovlen);
+
+__poll_t evl_socket_no_poll(struct evl_socket *esk,
+			struct oob_poll_wait *wait);
+
+int evl_socket_no_shutdown(struct evl_socket *esk, int how);
+
+int evl_socket_no_solicit(struct net *net,
+			struct net_device *dev,
+			struct sockaddr *addr, int flags);
+
+int evl_socket_no_offload(struct evl_socket *esk,
+			struct evl_net_offload *ofld);
+
+#endif /* !_EVL_NET_SOCKET_H */

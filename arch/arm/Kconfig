@@ -78,6 +78,7 @@ config ARM
 	select GENERIC_PCI_IOMAP
 	select GENERIC_SCHED_CLOCK
 	select GENERIC_SMP_IDLE_THREAD
+	select GENERIC_VDSO_CLOCKSOURCE if DOVETAIL
 	select HARDIRQS_SW_RESEND
 	select HAS_IOPORT
 	select HAVE_ARCH_AUDITSYSCALL if AEABI && !OABI_COMPAT
@@ -259,6 +260,11 @@ config FIQ
 
 config ARCH_MTD_XIP
 	bool
+
+# Limited I-pipe compat (syscall routing only).
+config IPIPE_COMPAT
+	bool
+	select DOVETAIL_LEGACY_SYSCALL_RANGE
 
 config ARM_PATCH_PHYS_VIRT
 	bool "Patch physical to virtual translations at runtime" if !ARCH_MULTIPLATFORM
@@ -946,6 +952,9 @@ config ARM_CPU_TOPOLOGY
 	  Support ARM cpu topology definition. The MPIDR register defines
 	  affinity between processors which is then used to describe the cpu
 	  topology of an ARM System.
+
+source "kernel/Kconfig.dovetail"
+source "kernel/Kconfig.evl"
 
 config HAVE_ARM_SCU
 	bool

@@ -1,0 +1,137 @@
+/*
+ * SPDX-License-Identifier: GPL-2.0
+ *
+ * Copyright (C) 2021 Philippe Gerum  <rpm@xenomai.org>
+ */
+
+#include <linux/errno.h>
+#include <linux/netdevice.h>
+#include <evl/net/skb.h>
+#include <evl/net/socket.h>
+#include <evl/net/device.h>
+#include <evl/net/output.h>
+
+/*
+ * add_vlan_tag() does manual tagging if the base device of @dev is
+ * oob-capable and does not provide hw-assisted tagging. Otherwise,
+ * expect the in-band stack to do the right thing (TM) as we are going
+ * to forward it the packet for transmission.
+ */
+static void add_vlan_tag(struct net_device *vlan_dev, struct sk_buff *skb)
+{
+	struct net_device *real_dev = evl_net_real_dev(vlan_dev);
+	__be16 vlan_proto;
+	u16 vlan_tci;
+
+	if (!netdev_is_oob_capable(real_dev))
+		return;
+
+	vlan_proto = vlan_dev_vlan_proto(vlan_dev);
+	vlan_tci = vlan_dev_vlan_id(vlan_dev);
+	vlan_tci |= vlan_dev_get_egress_qos_mask(vlan_dev, skb->priority);
+
+	if (real_dev->features & NETIF_F_HW_VLAN_CTAG_TX) {
+		__vlan_hwaccel_put_tag(skb, vlan_proto, vlan_tci);
+		return;
+	}
+
+	/*
+	 * Can't fail on skb_cow_head() since the caller is expected
+	 * to have reserved VLAN_HLEN bytes from the linear space for
+	 * us (otherwise, well, panic is looming..).
+	 */
+	__vlan_insert_tag(skb, vlan_proto, vlan_tci);
+	skb->protocol = vlan_proto;
+
+	/*
+	 * Since we inserted a tag manually into the packet, tell the
+	 * NIC driver that hw-assisted tagging is not needed.
+	 */
+	__vlan_hwaccel_clear_tag(skb);
+}
+
+/**
+ *	evl_net_ether_transmit_raw - pass an ethernet packet down to
+ *	the hardware as is. If @dev is a VLAN device, this routine
+ *	tags the outgoing packet accordingly for the device.
+ *
+ *	We are called from a protocol handler running in oob context,
+ *	hard irqs on. @skb is not linked to any queue.
+ */
+int evl_net_ether_transmit_raw(struct net_device *dev, struct sk_buff *skb)
+{
+	struct evl_netdev_stats *stats;
+
+	if (is_vlan_dev(dev)) {
+		add_vlan_tag(dev, skb);
+		/* We have separate statistics about VLAN device I/O. */
+		stats = evl_net_get_stats(dev);
+		evl_counter_inc_careful(&stats->tx_packets);
+		evl_counter_add_careful(&stats->tx_bytes, skb->len);
+	}
+
+	skb_reset_mac_len(skb);
+
+	netdev_dbg(dev, "transmitting %px\n", skb);
+
+	return evl_net_transmit(dev, skb);
+}
+
+static int ether_transmit_one(struct net_device *dev, struct sk_buff *skb,
+			const void *hw_dst)
+{
+	struct ethhdr *eth;
+
+	skb_reset_network_header(skb);
+	eth = skb_push(skb, ETH_HLEN);
+	skb_reset_mac_header(skb);
+	eth->h_proto = skb->protocol;
+	ether_addr_copy(eth->h_dest, hw_dst);
+	ether_addr_copy(eth->h_source, evl_net_real_dev(dev)->dev_addr);
+
+	return evl_net_ether_transmit_raw(dev, skb);
+}
+
+/**
+ *  evl_net_ether_transmit - set the l2 header of an ethernet packet
+ *  before passing it down to the hardware.  This routine can deal
+ *  with fragmented output.
+ *
+ *  CAUTION: unlike other calls in this family, on transmit error,
+ *  evl_net_ether_transmit() releases all the untransmitted buffers.
+ */
+int evl_net_ether_transmit(struct net_device *dev, struct sk_buff *skb,
+			const void *hw_dst)
+{
+	struct sk_buff *fskb, *nskb;
+	int ret;
+
+	fskb = skb_shinfo(skb)->frag_list;
+	if (fskb)
+		skb_shinfo(skb)->frag_list = NULL;
+
+	ret = ether_transmit_one(dev, skb, hw_dst);
+	if (ret) {
+		evl_net_wput_skb(skb);
+		return ret;
+	}
+
+	while (fskb)  {
+		nskb = fskb->next;
+		fskb->next = NULL;
+		ret = ether_transmit_one(dev, fskb, hw_dst);
+		if (ret) {
+			fskb->next = nskb;
+			do {
+				nskb = fskb->next;
+				fskb->next = NULL;
+				evl_net_wput_skb(fskb);
+				fskb = nskb;
+			} while (fskb);
+			return ret;
+		}
+		fskb = nskb;
+	}
+
+	return 0;
+}

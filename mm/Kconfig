@@ -631,7 +631,7 @@ config COMPACTION
 config COMPACT_UNEVICTABLE_DEFAULT
 	int
 	depends on COMPACTION
-	default 0 if PREEMPT_RT
+	default 0 if PREEMPT_RT || DOVETAIL
 	default 1
 
 #
@@ -816,7 +816,7 @@ config MM_ID
 
 menuconfig TRANSPARENT_HUGEPAGE
 	bool "Transparent Hugepage Support"
-	depends on HAVE_ARCH_TRANSPARENT_HUGEPAGE && !PREEMPT_RT
+	depends on HAVE_ARCH_TRANSPARENT_HUGEPAGE && !PREEMPT_RT && !DOVETAIL
 	select COMPACTION
 	select XARRAY_MULTI
 	select MM_ID

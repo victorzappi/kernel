@@ -61,6 +61,7 @@ enum dma_transaction_type {
 	DMA_ASYNC_TX,
 	DMA_SLAVE,
 	DMA_CYCLIC,
+	DMA_OOB,
 	DMA_INTERLEAVE,
 	DMA_COMPLETION_NO_ORDER,
 	DMA_REPEAT,
@@ -204,6 +205,13 @@ struct dma_vec {
  *  descriptor.
  *  @DMA_PREP_UNLOCK: tell the driver that there is a un-lock bit set on command
  *  descriptor.
+ * @DMA_OOB_INTERRUPT - if DMA_OOB is supported, handle the completion
+ *  interrupt for this transaction from the out-of-band stage (implies
+ *  DMA_PREP_INTERRUPT). This includes calling the completion callback routine
+ *  from such context if defined for the transaction.
+ * @DMA_OOB_PULSE - if DMA_OOB is supported, (slave) transactions on the
+ *  out-of-band channel should be triggered manually by a call to
+ *  dma_pulse_oob() (implies DMA_OOB_INTERRUPT).
  */
 enum dma_ctrl_flags {
 	DMA_PREP_INTERRUPT = (1 << 0),
@@ -218,6 +226,12 @@ enum dma_ctrl_flags {
 	DMA_PREP_LOAD_EOT = (1 << 9),
 	DMA_PREP_LOCK = (1 << 10),
 	DMA_PREP_UNLOCK = (1 << 11),
+	/*
+	 * EVL uses bits 10 and 11 for these; moved up because the qcom tree
+	 * already gives those bits to DMA_PREP_LOCK/UNLOCK (bam_dma, qce).
+	 */
+	DMA_OOB_INTERRUPT = (1 << 12),
+	DMA_OOB_PULSE = (1 << 13),
 };
 
 /**
@@ -959,6 +973,7 @@ struct dma_device {
 					    dma_cookie_t cookie,
 					    struct dma_tx_state *txstate);
 	void (*device_issue_pending)(struct dma_chan *chan);
+	int (*device_pulse_oob)(struct dma_chan *chan);
 	void (*device_release)(struct dma_device *dev);
 	/* debugfs support */
 	void (*dbg_summary_show)(struct seq_file *s, struct dma_device *dev);
@@ -1015,11 +1030,22 @@ static inline struct dma_async_tx_descriptor *dmaengine_prep_peripheral_dma_vec(
 							    dir, flags);
 }
 
+static inline bool dmaengine_oob_valid(struct dma_chan *chan,
+				unsigned long flags)
+{
+	return !(dovetailing() &&
+		flags & (DMA_OOB_INTERRUPT|DMA_OOB_PULSE) &&
+		!test_bit(DMA_OOB, chan->device->cap_mask.bits));
+}
+
 static inline struct dma_async_tx_descriptor *dmaengine_prep_slave_sg(
 	struct dma_chan *chan, struct scatterlist *sgl,	unsigned int sg_len,
 	enum dma_transfer_direction dir, unsigned long flags)
 {
 	if (!chan || !chan->device || !chan->device->device_prep_slave_sg)
+		return NULL;
+
+	if (!dmaengine_oob_valid(chan, flags))
 		return NULL;
 
 	return chan->device->device_prep_slave_sg(chan, sgl, sg_len,
@@ -1047,6 +1073,9 @@ static inline struct dma_async_tx_descriptor *dmaengine_prep_dma_cyclic(
 		unsigned long flags)
 {
 	if (!chan || !chan->device || !chan->device->device_prep_dma_cyclic)
+		return NULL;
+
+	if (!dmaengine_oob_valid(chan, flags))
 		return NULL;
 
 	return chan->device->device_prep_dma_cyclic(chan, buf_addr, buf_len,
@@ -1459,6 +1488,22 @@ __dma_has_cap(enum dma_transaction_type tx_type, dma_cap_mask_t *srcp)
 static inline void dma_async_issue_pending(struct dma_chan *chan)
 {
 	chan->device->device_issue_pending(chan);
+}
+
+/**
+ * dma_pulse_oob - manual trigger of an out-of-band transaction
+ * @chan: target DMA channel
+ *
+ * Trigger the next out-of-band transaction immediately.
+ */
+static inline int dma_pulse_oob(struct dma_chan *chan)
+{
+	int ret = -ENOTSUPP;
+
+	if (chan->device->device_pulse_oob)
+		ret = chan->device->device_pulse_oob(chan);
+
+	return ret;
 }
 
 /**

@@ -10,6 +10,7 @@
 #include <linux/cpu.h>
 #include <linux/debugfs.h>
 #include <linux/hardirq.h>
+#include <linux/irqstage.h>
 #include <linux/init.h>
 #include <linux/ptrace.h>
 #include <linux/kprobes.h>
@@ -168,7 +169,7 @@ static void send_user_sigtrap(int si_code)
 		return;
 
 	if (!regs_irqs_disabled(regs))
-		local_irq_enable();
+		local_irq_enable_full();
 
 	arm64_force_sig_fault(SIGTRAP, si_code, instruction_pointer(regs),
 			      "User debug trap");

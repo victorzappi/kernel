@@ -14,6 +14,7 @@
 
 struct task_struct;
 
+#include <dovetail/thread_info.h>
 #include <asm/memory.h>
 #include <asm/stack_pointer.h>
 #include <asm/types.h>
@@ -23,6 +24,7 @@ struct task_struct;
  */
 struct thread_info {
 	unsigned long		flags;		/* low level flags */
+	unsigned long		local_flags;	/* local (synchronous) flags */
 #ifdef CONFIG_ARM64_SW_TTBR0_PAN
 	u64			ttbr0;		/* saved TTBR0_EL1 */
 #endif
@@ -43,6 +45,7 @@ struct thread_info {
 	void			*scs_sp;
 #endif
 	u32			cpu;
+	struct oob_thread_state	oob_state;
 };
 
 #define thread_saved_pc(tsk)	\
@@ -54,6 +57,8 @@ struct thread_info {
 
 void arch_setup_new_exec(void);
 #define arch_setup_new_exec     arch_setup_new_exec
+
+#define ti_local_flags(__ti)	((__ti)->local_flags)
 
 #endif
 
@@ -71,6 +76,9 @@ void arch_setup_new_exec(void);
 #define TIF_SECCOMP		11	/* syscall secure computing */
 #define TIF_SYSCALL_EMU		12	/* syscall emulation active */
 #define TIF_PATCH_PENDING	13	/* pending live patching update */
+#define TIF_KERNEL_FP_PREEMPTED	15	/* Dovetail: kernel mode FPSIMD section preempted by OOB */
+#define TIF_MAYDAY		16	/* Emergency trap pending */
+#define TIF_RETUSER		17	/* INBAND_TASK_RETUSER is pending */
 #define TIF_MEMDIE		18	/* is terminating due to OOM killer */
 #define TIF_FREEZE		19
 #define TIF_RESTORE_SIGMASK	20
@@ -99,6 +107,8 @@ void arch_setup_new_exec(void);
 #define _TIF_SYSCALL_EMU	(1 << TIF_SYSCALL_EMU)
 #define _TIF_PATCH_PENDING	(1 << TIF_PATCH_PENDING)
 #define _TIF_UPROBE		(1 << TIF_UPROBE)
+#define _TIF_MAYDAY		(1 << TIF_MAYDAY)
+#define _TIF_RETUSER		(1 << TIF_RETUSER)
 #define _TIF_SINGLESTEP		(1 << TIF_SINGLESTEP)
 #define _TIF_32BIT		(1 << TIF_32BIT)
 #define _TIF_SVE		(1 << TIF_SVE)
@@ -109,7 +119,7 @@ void arch_setup_new_exec(void);
 #define _TIF_WORK_MASK		(_TIF_NEED_RESCHED | _TIF_NEED_RESCHED_LAZY | \
 				 _TIF_NOTIFY_RESUME | _TIF_FOREIGN_FPSTATE | \
 				 _TIF_UPROBE | _TIF_MTE_ASYNC_FAULT | \
-				 _TIF_NOTIFY_SIGNAL | _TIF_SIGPENDING | \
+				 _TIF_RETUSER | _TIF_NOTIFY_SIGNAL | _TIF_SIGPENDING | \
 				 _TIF_PATCH_PENDING)
 
 #define _TIF_SYSCALL_WORK	(_TIF_SYSCALL_TRACE | _TIF_SYSCALL_AUDIT | \
@@ -130,5 +140,14 @@ void arch_setup_new_exec(void);
 	.preempt_count	= INIT_PREEMPT_COUNT,				\
 	INIT_SCS							\
 }
+
+/*
+ * Local (synchronous) thread flags.
+ */
+#define _TLF_OOB			0x0001
+#define _TLF_DOVETAIL			0x0002
+#define _TLF_OFFSTAGE			0x0004
+#define _TLF_OOBTRAP			0x0008
+#define _TLF_KERNEL_FPU_PREEMPTED	0x0010	/* Dovetail: kernel mode FPSIMD section preempted by OOB */
 
 #endif /* __ASM_THREAD_INFO_H */

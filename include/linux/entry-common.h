@@ -7,6 +7,7 @@
 #include <linux/seccomp.h>
 #include <linux/sched.h>
 #include <linux/livepatch.h>
+#include <linux/irq_pipeline.h>
 #include <linux/resume_user_mode.h>
 
 #include <asm/entry-common.h>
@@ -43,6 +44,14 @@
 				 SYSCALL_WORK_SYSCALL_USER_DISPATCH |	\
 				 SYSCALL_WORK_SYSCALL_EXIT_TRAP	|	\
 				 ARCH_SYSCALL_WORK_EXIT)
+
+/*
+ * Status codes of syscall entry when Dovetail is enabled. Must not
+ * conflict with valid syscall numbers. And with -1 which seccomp uses
+ * to skip an syscall.
+ */
+#define EXIT_SYSCALL_OOB	(-2)
+#define EXIT_SYSCALL_TAIL	(-3)
 
 /**
  * syscall_enter_from_user_mode_prepare - Establish state and enable interrupts
@@ -90,11 +99,46 @@ long syscall_trace_enter(struct pt_regs *regs, long syscall,
 static __always_inline long syscall_enter_from_user_mode_work(struct pt_regs *regs, long syscall)
 {
 	unsigned long work = READ_ONCE(current_thread_info()->syscall_work);
+	int ret;
+
+	/*
+	 * Pipeline the syscall to the companion core if the current
+	 * task wants this. Compiled out if not dovetailing.
+	 */
+	ret = pipeline_syscall(syscall, regs);
+	if (ret > 0)	/* out-of-band, bail out. */
+		return EXIT_SYSCALL_OOB;
+	if (ret < 0)		/* in-band, tail work only. */
+		return EXIT_SYSCALL_TAIL;
 
 	if (work & SYSCALL_WORK_ENTER)
 		syscall = syscall_trace_enter(regs, syscall, work);
 
 	return syscall;
+}
+
+static __always_inline void
+syscall_enter_from_user_enable_irqs(void)
+{
+	if (running_inband()) {
+		/*
+		 * If pipelining interrupts, prepare for emulating a
+		 * stall -> unstall transition (we are currently
+		 * unstalled), fixing up the IRQ trace state in order
+		 * to keep lockdep happy (and silent).
+		 */
+		stall_inband_nocheck();
+		hard_cond_local_irq_enable();
+		local_irq_enable();
+	} else {
+		/*
+		 * We are running on the out-of-band stage, don't mess
+		 * with the in-band interrupt state. This is none of
+		 * our business. We may manipulate the hardware state
+		 * only.
+		 */
+		hard_local_irq_enable();
+	}
 }
 
 /**
@@ -121,7 +165,7 @@ static __always_inline long syscall_enter_from_user_mode(struct pt_regs *regs, l
 	enter_from_user_mode(regs);
 
 	instrumentation_begin();
-	local_irq_enable();
+	syscall_enter_from_user_enable_irqs();
 	ret = syscall_enter_from_user_mode_work(regs, syscall);
 	instrumentation_end();
 
@@ -136,6 +180,23 @@ static __always_inline long syscall_enter_from_user_mode(struct pt_regs *regs, l
  * Do one-time syscall specific work.
  */
 void syscall_exit_work(struct pt_regs *regs, unsigned long work);
+
+static inline bool syscall_has_exit_work(struct pt_regs *regs,
+					 unsigned long work)
+{
+	/*
+	 * Dovetail: if this does not look like an in-band syscall, it
+	 * has to belong to the companion core.  Skip the work for
+	 * those syscalls.
+	 */
+	if (unlikely(work & SYSCALL_WORK_EXIT)) {
+		if (!irqs_pipelined())
+			return true;
+		return !in_oob_syscall(regs);
+	}
+
+	return false;
+}
 
 /**
  * syscall_exit_to_user_mode_work - Handle work before returning to user mode
@@ -159,7 +220,7 @@ static __always_inline void syscall_exit_to_user_mode_work(struct pt_regs *regs)
 
 	if (IS_ENABLED(CONFIG_PROVE_LOCKING)) {
 		if (WARN(irqs_disabled(), "syscall %lu left IRQs disabled", nr))
-			local_irq_enable();
+			local_irq_enable_full();
 	}
 
 	rseq_syscall(regs);
@@ -169,7 +230,7 @@ static __always_inline void syscall_exit_to_user_mode_work(struct pt_regs *regs)
 	 * enabled, we want to run them exactly once per syscall exit with
 	 * interrupts enabled.
 	 */
-	if (unlikely(work & SYSCALL_WORK_EXIT))
+	if (syscall_has_exit_work(regs, work))
 		syscall_exit_work(regs, work);
 	local_irq_disable_exit_to_user();
 	exit_to_user_mode_prepare(regs);

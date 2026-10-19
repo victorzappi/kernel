@@ -1,0 +1,96 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+#ifndef _ASM_GENERIC_EVL_NETDEVICE_H
+#define _ASM_GENERIC_EVL_NETDEVICE_H
+
+#include <linux/list.h>
+#include <linux/rcupdate.h>
+#include <linux/refcount.h>
+#include <linux/mutex.h>
+#include <net/page_pool/types.h>
+#include <evl/wait.h>
+#include <evl/poll.h>
+#include <evl/flag.h>
+#include <evl/stax.h>
+#include <evl/stat.h>
+#include <evl/crossing.h>
+
+struct evl_net_qdisc;
+struct evl_kthread;
+struct bpf_prog;
+
+struct evl_net_skb_queue {
+	struct list_head queue;
+	hard_spinlock_t lock;
+};
+
+struct evl_net_ebpf_filter {
+	struct rcu_head rcu;
+	struct bpf_prog *prog;
+};
+
+#define EVL_NETDEV_RX_SCHED_BIT   0
+#define EVL_NETDEV_RX_FILTER_BIT  1
+
+/* Runtime state of a base device channelling oob traffic. */
+struct evl_netdev_state {
+	/* TX page pool (premapped if device is oob-capable). */
+	struct page_pool *tx_pages;
+	struct evl_wait_queue tx_wait;
+	size_t pool_max;
+	size_t buf_size;
+	struct evl_poll_head poll_head;
+	/* RX handling */
+	struct evl_kthread *rx_handler;
+	struct evl_flag rx_flag;
+	struct evl_net_skb_queue rx_packets; /* Ingress packets to process (oob) */
+	struct list_head napi_poll; /* NAPI instances to poll (oob) */
+	hard_spinlock_t napi_lock; /* Serializes accesses to napi_poll */
+	/* TX handling */
+	struct evl_net_qdisc *qdisc;
+	struct evl_kthread *tx_handler;
+	struct evl_flag tx_flag;
+	/* RX filter/redirector */
+	spinlock_t filter_lock;
+	struct evl_net_ebpf_filter __rcu *rx_filter;
+	/* Runtime state flags. */
+	unsigned long flags;
+	/* Number of oob ports using this device. */
+	refcount_t users;
+	/* List of upper (VLAN) devices. */
+	struct list_head vlans;
+};
+
+struct evl_netdev_stats {
+	evl_counter64 rx_packets;
+	evl_counter64 rx_bytes;
+	evl_counter64 tx_packets;
+	evl_counter64 tx_bytes;
+	evl_counter32 rx_nomem;
+	evl_counter32 tx_nomem;
+	evl_counter32 csum_errors;
+};
+
+struct oob_netdev_state {
+	struct evl_netdev_state *estate;
+	struct evl_netdev_stats *stats;
+	struct mutex bind_lock;
+	struct list_head bindings; /* evl_socket->next_binding */
+	struct evl_crossing crossing;
+	struct list_head next;	/* in oob_port_list */
+};
+
+struct oob_netqueue_state {
+	struct evl_stax tx_lock;	/* inband vs oob exclusion lock */
+};
+
+static inline void netqueue_init_oob(struct oob_netqueue_state *qs)
+{
+	evl_init_stax(&qs->tx_lock, EVL_STAX_INBAND_SPIN);
+}
+
+static inline void netqueue_destroy_oob(struct oob_netqueue_state *qs)
+{
+	evl_destroy_stax(&qs->tx_lock);
+}
+
+#endif /* !_ASM_GENERIC_EVL_NETDEVICE_H */
