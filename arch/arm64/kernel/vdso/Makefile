@@ -32,6 +32,8 @@ ldflags-y += -T
 
 ccflags-y := -fno-common -fno-builtin -fno-stack-protector -ffixed-x18
 ccflags-y += -DDISABLE_BRANCH_PROFILING -DBUILD_VDSO
+# Dovetail's MMIO clocksource readers use readl_relaxed(); never trace them
+ccflags-y += -D__DISABLE_TRACE_MMIO__
 
 # -Wmissing-prototypes and -Wmissing-declarations are removed from
 # the CFLAGS to make possible to build the kernel with CONFIG_WERROR enabled.
