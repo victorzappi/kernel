@@ -53,7 +53,7 @@ struct pdc_pin_region {
 
 #define pin_to_hwirq(r, p)	((r)->parent_base + (p) - (r)->pin_base)
 
-static DEFINE_RAW_SPINLOCK(pdc_lock);
+static DEFINE_HARD_SPINLOCK(pdc_lock);
 static void __iomem *pdc_base;
 static void __iomem *pdc_prev_base;
 static struct pdc_pin_region *pdc_region;
@@ -277,7 +277,8 @@ static struct irq_chip qcom_pdc_gic_chip = {
 	.flags			= IRQCHIP_MASK_ON_SUSPEND |
 				  IRQCHIP_SET_TYPE_MASKED |
 				  IRQCHIP_SKIP_SET_WAKE |
-				  IRQCHIP_ENABLE_WAKEUP_ON_SUSPEND,
+				  IRQCHIP_ENABLE_WAKEUP_ON_SUSPEND |
+				  IRQCHIP_PIPELINE_SAFE,
 	.irq_set_vcpu_affinity	= irq_chip_set_vcpu_affinity_parent,
 	.irq_set_affinity	= irq_chip_set_affinity_parent,
 };
