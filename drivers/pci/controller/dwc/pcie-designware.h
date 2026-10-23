@@ -434,7 +434,7 @@ struct dw_pcie_rp {
 	u32			num_vectors;
 	u32			irq_mask[MAX_MSI_CTRLS];
 	struct pci_host_bridge  *bridge;
-	raw_spinlock_t		lock;
+	hard_spinlock_t		lock;
 	DECLARE_BITMAP(msi_irq_in_use, MAX_MSI_IRQS);
 	bool			use_atu_msg;
 	int			msg_atu_index;

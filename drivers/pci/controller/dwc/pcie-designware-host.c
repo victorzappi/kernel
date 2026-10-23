@@ -167,6 +167,7 @@ static struct irq_chip dw_pci_msi_bottom_irq_chip = {
 	.irq_compose_msi_msg = dw_pci_setup_msi_msg,
 	.irq_mask = dw_pci_bottom_mask,
 	.irq_unmask = dw_pci_bottom_unmask,
+	.flags = IRQCHIP_PIPELINE_SAFE,
 };
 
 static int dw_pcie_irq_domain_alloc(struct irq_domain *domain,
